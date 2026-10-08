@@ -1,10 +1,11 @@
-/* InkLit V2 service worker
-   - New cache names flush every V1 cache (inklit-v1) on activate.
+/* InkLit V2.1 service worker
+   - New cache names flush older caches on activate.
    - App shell works fully offline; the Firebase SDK and fonts are cached after first load,
      so Firestore's offline cache can boot without a connection and re-sync on reconnect.
-   - Firestore, Auth, Gemini and avatar requests always go straight to the network. */
+   - Firestore, Auth, Gemini and avatar requests always go straight to the network.
+   - V2.1: live reading-timer notification while InkLit is minimized or closed. */
 
-const VERSION = 'v2';
+const VERSION = 'v2.1';
 const APP_CACHE = `inklit-${VERSION}-app-cache`;
 const RUNTIME_CACHE = `inklit-${VERSION}-runtime-cache`;
 const KEEP = [APP_CACHE, RUNTIME_CACHE];
@@ -30,7 +31,10 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('message', event => {
-  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+  const d = event.data || {};
+  if (d.type === 'SKIP_WAITING') self.skipWaiting();
+  else if (d.type === 'TIMER_SHOW') event.waitUntil(showTimer(d));
+  else if (d.type === 'TIMER_HIDE') event.waitUntil(hideTimer());
 });
 
 const isFirebaseSdk = url => url.hostname === 'www.gstatic.com' && url.pathname.startsWith('/firebasejs/');
@@ -99,19 +103,100 @@ self.addEventListener('sync', event => {
   );
 });
 
-/* Friend cheers and timer alerts are shown by the page through registration.showNotification. */
+/* Live reading-timer notification.
+   The page sends TIMER_SHOW when it's hidden with a session running. This worker redraws
+   the notification every few seconds for as long as the browser keeps it awake (about
+   5 minutes per wake-up; the page re-arms it while it's alive). The page's timer is
+   timestamp-based, so the time is exact whenever the app is reopened. */
+const TIMER_TAG = 'inklit-timer';
+const TIMER_TICK_MS = 5000;
+const TIMER_WAKE_MS = 4.5 * 60 * 1000;
+let timerState = null;  // { base, mode, targetMs, book, endsAt }
+let timerLoop = null;
+let timerWake = null;
+let dismissedBase = 0;  // a session the reader swiped away; don't bring it back
+
+const pad2 = n => String(n).padStart(2, '0');
+function clock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}:${pad2(m)}:${pad2(s % 60)}` : `${m}:${pad2(s % 60)}`;
+}
+
+async function drawTimer() {
+  const t = timerState;
+  if (!t) return;
+  const elapsed = Date.now() - t.base;
+  const countdown = t.mode === 'countdown';
+  if (countdown && elapsed >= t.targetMs) {
+    timerState = null;
+    await self.registration.showNotification('📚 Reading session complete', {
+      tag: TIMER_TAG, renotify: true, requireInteraction: true, vibrate: [200, 100, 200],
+      body: `You read for ${Math.round(t.targetMs / 60000)} minutes. Tap to log your pages.`,
+      icon: 'icon-192.png', badge: 'icon-192.png', data: { tab: 'home', action: 'timer', kind: 'done' }
+    });
+    return;
+  }
+  await self.registration.showNotification(countdown ? `Reading · ${clock(t.targetMs - elapsed)} left` : `Reading · ${clock(elapsed)}`, {
+    tag: TIMER_TAG, silent: true, renotify: false, requireInteraction: true, timestamp: t.base,
+    body: [t.book, countdown && t.endsAt ? `Ends at ${t.endsAt}` : '', 'Tap to open your timer'].filter(Boolean).join(' · '),
+    icon: 'icon-192.png', badge: 'icon-192.png', data: { tab: 'home', action: 'timer', kind: 'live', base: t.base }
+  });
+}
+
+function runTimerLoop() {
+  if (timerLoop) return timerLoop;
+  timerLoop = (async () => {
+    const until = Date.now() + TIMER_WAKE_MS;
+    while (timerState && Date.now() < until) {
+      try { await drawTimer(); } catch { timerState = null; } // no permission: stop quietly
+      if (!timerState) break;
+      await new Promise(r => { timerWake = r; setTimeout(r, TIMER_TICK_MS); });
+    }
+  })().finally(() => { timerLoop = null; timerWake = null; });
+  return timerLoop;
+}
+
+function showTimer(d) {
+  if (!d.base || d.base === dismissedBase) return Promise.resolve();
+  timerState = { base: d.base, mode: d.mode, targetMs: d.targetMs, book: d.book || '', endsAt: d.endsAt || '' };
+  return runTimerLoop();
+}
+
+async function hideTimer() {
+  timerState = null;
+  if (timerWake) timerWake();
+  if (timerLoop) await timerLoop;
+  const list = await self.registration.getNotifications({ tag: TIMER_TAG });
+  list.forEach(n => { if (n.data && n.data.kind === 'live') n.close(); });
+}
+
+self.addEventListener('notificationclose', event => {
+  const data = event.notification.data || {};
+  if (data.kind !== 'live') return;
+  dismissedBase = data.base || 0;
+  timerState = null;
+  if (timerWake) timerWake();
+});
+
+/* Friend cheers, timer alerts and the live timer all open the app here. */
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const tab = (event.notification.data && event.notification.data.tab) || 'home';
+  const data = event.notification.data || {};
+  const tab = data.tab || 'home';
+  const openTimer = data.action === 'timer';
+  if (data.kind === 'live') { timerState = null; if (timerWake) timerWake(); }
   event.waitUntil((async () => {
     const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of list) {
       if ('focus' in client) {
         await client.focus();
-        client.postMessage({ type: 'OPEN_TAB', tab });
+        client.postMessage(openTimer ? { type: 'OPEN_TIMER' } : { type: 'OPEN_TAB', tab });
         return;
       }
     }
-    if (self.clients.openWindow) await self.clients.openWindow(new URL(`./#${tab}`, self.registration.scope).href);
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(new URL(openTimer ? './?action=timer' : `./#${tab}`, self.registration.scope).href);
+    }
   })());
 });
