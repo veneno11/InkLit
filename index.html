@@ -4855,8 +4855,7 @@ onAction({ 'tab': el => switchTab(el.dataset.tab) });
    32. V2.1 — SHARED BITS
    ===================================================================== */
 ICONS.image = '<rect x="3" y="3.5" width="18" height="17" rx="2.5"/><circle cx="9" cy="9.5" r="1.8"/><path d="m21 15.5-5-5L5 20.5"/>';
-// Gemini 2.5 models take a thinking budget instead of a thinking level; 0 keeps checks quick
-AI.overrides['gemini-2.5-flash'] = { thinkingConfig: { thinkingBudget: 0 } };
+
 
 /* =====================================================================
    33. CAMERA COVER SNAP
@@ -5073,12 +5072,10 @@ const REFLECT_XP = 20;                 // approved reflection
 const REFLECT_BONUS_XP = 50;           // optional 3rd word used correctly
 const REFLECT_MIN_SEC = 60;            // timer sessions under a minute don't need a reflection
 const REFLECT_MAX_AGE = 3 * 86400000;  // an unfinished reflection is dropped after 3 days
-// Gemini 2.5 Flash first. It shuts down Oct 16, 2026 and many newer keys can't use it,
-// so InkLit falls back to 3.6 Flash, then 3.5 Flash-Lite.
-const REFLECT_MODELS = Date.now() < Date.parse('2026-10-17')
-  ? ['gemini-2.5-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']
-  : ['gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+// Gemini 3.5 Flash-Lite first, with 3.6 Flash as the backup
+const REFLECT_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.6-flash'];
 let reflectDraft = null;
+
 
 const REFLECT_SCHEMA = {
   type: 'OBJECT', required: ['substanceNote', 'substance', 'words', 'feedback'],
