@@ -2633,9 +2633,6 @@ function saveBookFromSheet() {
   toast(existing ? 'Book updated.' : `${title} added to Currently reading.`, { type: 'success', ic: 'book' });
 }
 
-  toast(existing ? 'Book updated.' : `${title} added to Currently reading.`, { type: 'success', ic: 'book' });
-}
-
 onChange({
   'cover-file': async el => {
     const file = el.files?.[0];
