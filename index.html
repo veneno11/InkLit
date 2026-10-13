@@ -5700,40 +5700,7 @@ function setCwPos(p) {
   $$('#cwPos .chip').forEach(c => c.classList.toggle('on', c.dataset.v === cwDraft.pos));
 }
 
-function openCustomWordSheet(id = null) {
-  const w = id ? S.vocab[id] : null;
-  if (id && !w) return;
-  const ai = hasAI();
-  cwDraft = {
-    id: w?.wordId || null, pos: w?.pos || '', filledFor: w?.word || '', busy: false, auto: null,
-    extra: w ? { clue: w.clue, colloc: w.colloc, right: w.right, wrong: w.wrong } : null
-  };
-  const sheet = openSheet(`${sheetHead(w ? 'Edit your word' : 'Add your own word', w ? 'edit' : 'plus')}
-    <p class="muted">${w ? 'Fix anything that looks off. Your review schedule stays the same.'
-      : ai ? 'Type a word or phrase from your reading. Gemini fills in the rest, and you can change anything before you save.'
-      : `Type a word or phrase, then add its meaning and an example. <button type="button" class="link" data-act="open-settings" style="padding:0">Add a Gemini key</button> to fill these in automatically.`}</p>
-    <label class="label" for="cwWord">Word or phrase</label>
-    <div class="cw-row">
-      <input class="field" id="cwWord" maxlength="40" autocomplete="off" autocapitalize="none" spellcheck="true" placeholder="e.g. nuance, or take for granted" value="${esc(w?.word || '')}" ${w ? 'readonly' : 'autofocus'}>
-      ${!w && ai ? `<button type="button" class="btn btn-primary" id="cwFill" data-act="cw-fill">${icon('sparkles')} Auto-fill</button>` : ''}
-    </div>
-    <p class="form-status" id="cwStatus"></p>
-    <p class="label">Part of speech</p>
-    <div class="chips" id="cwPos">${CW_POS.map(p => `<button type="button" class="chip${cwDraft.pos === p ? ' on' : ''}" data-act="cw-pos" data-v="${p}">${p}</button>`).join('')}</div>
-    <label class="label" for="cwPron">Pronunciation (optional)</label>
-    <input class="field" id="cwPron" maxlength="48" autocomplete="off" spellcheck="false" placeholder="e.g. NOO-ahns" value="${esc(w?.pron || '')}">
-    <label class="label" for="cwDef">Meaning</label>
-    <textarea class="field short" id="cwDef" rows="2" maxlength="200" placeholder="What it means, in plain words">${esc(w?.def || '')}</textarea>
-    <label class="label" for="cwEx">Example sentence</label>
-    <textarea class="field short" id="cwEx" rows="2" maxlength
 
-The rest of Edit 16 continues below, followed by Edit 17 and the `sw.js` and `manifest.json` changes.
-
-The last message cut off partway through `openCustomWordSheet`. Delete that partial function and paste the full version below in its place, right after `setCwPos`. Everything before it in section 37 was complete, and so was section 36.
-
-### Edit 16 (continued) — rest of section 37, custom words
-
-```js
 function openCustomWordSheet(id = null) {
   const w = id ? S.vocab[id] : null;
   if (id && !w) return;
