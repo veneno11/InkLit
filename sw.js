@@ -198,5 +198,18 @@ self.addEventListener('notificationclick', event => {
     if (self.clients.openWindow) {
       await self.clients.openWindow(new URL(openTimer ? './?action=timer' : `./#${tab}`, self.registration.scope).href);
     }
-  })());
+ // ---- Daily reminders (sent by the hourly job on GitHub) ----
+self.addEventListener('push', event => {
+  let p = {};
+  try { p = event.data ? event.data.json() : {}; } catch (_) {}
+  const d = p.data || p;
+  if (!d || !d.title) return;
+  event.waitUntil(self.registration.showNotification(d.title, {
+    body: d.body || '',
+    icon: 'icon-192.png',
+    badge: 'icon-192.png',
+    tag: d.tag || 'inklit-reminder',
+    renotify: true,
+    data: { tab: d.tab || 'home', action: d.action || '' }
+  }));
 });
