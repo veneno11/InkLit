@@ -823,7 +823,16 @@ mark.hl[data-act]:hover{background:rgba(139,92,246,.32)}
 .cw-item{width:100%;text-align:left;padding:12px 8px;border-radius:12px;transition:background-color .2s}
 .cw-item:hover{background:var(--raised)}
 .cw-item .q-word,.cw-item .q-def{display:block}
-
+/* =====================================================================
+   V2.3 — long titles wrap instead of stretching the page
+   ===================================================================== */
+.rlist{grid-template-columns:minmax(0,1fr)}
+@media(min-width:700px){.rlist{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.rlist>*,.flist>*,.quick>*{min-width:0}
+.rtitle{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;line-height:1.25}
+.rmeta,.arch-title,.sheet-title,.rf-book,.pname,.q-word{overflow-wrap:anywhere}
+.arch{grid-template-columns:150px minmax(0,1fr)}
+@media(max-width:420px){.arch{grid-template-columns:minmax(0,1fr)}}
 </style>
 </head>
 <body>
@@ -4798,7 +4807,7 @@ function openSettings(focus = '') {
       </div>
       <p class="form-status" id="keyStatus"></p>
     </div>
-
+${remindersBlockHTML()}
     <div class="set-block">
       <div class="set-title"><span>${icon('sliders')} This device</span></div>
       ${sw('sound', 'Sounds', 'Little blips for taps and wins')}
@@ -5857,8 +5866,8 @@ onAction({
    The lesson player is decorated automatically whenever it re-renders, so the lesson
    view functions stay untouched. Badges only show on desktop-class screens.
    ===================================================================== */
-const KBD_LABEL = { enter: 'Enter', space: 'Space', esc: 'Esc' };
-const ARIA_KEY = { enter: 'Enter', space: 'Space', esc: 'Escape' };
+const KBD_LABEL = { enter: 'Enter', space: 'Space', esc: 'Esc', mic: 'M' };
+const ARIA_KEY = { enter: 'Enter', space: 'Space', esc: 'Escape', mic: 'M' };
 const kbd = (k, always = false) => `<kbd class="kbd${always ? ' show' : ''}" aria-hidden="true">${esc(KBD_LABEL[k] || k)}</kbd>`;
 
 function bindKey(el, keys) {
@@ -5893,6 +5902,7 @@ function decorateLesson() {
   $$('[data-act="ls-grade"]', root).forEach(el => bindKey(el, { 1: '1', 3: '2', 5: '3' }[el.dataset.g]));
   $$('[data-act="ls-pick"]', root).forEach(el => bindKey(el, String(Number(el.dataset.i) + 1)));
   $$('[data-act="ls-speak"][data-what="story"]', root).forEach(el => bindKey(el, 'space'));
+   $$('[data-act="ls-mic"], [data-act="ls-prod-mic"]', root).forEach(el => bindKey(el, 'mic'));
   const more = $('[data-act="lesson-more"]', root);
   $$('[data-act="lesson-done"]', root).forEach(el => bindKey(el, more ? 'esc' : 'enter esc'));
 }
@@ -5916,6 +5926,7 @@ function keyName(e) {
   if (k === 'Enter') return 'enter';
   if (k === ' ' || k === 'Spacebar') return 'space';
   if (k === '?') return 'help';
+  if (k === 'm' || k === 'M') return 'mic';
   if (/^[1-4]$/.test(k)) return k;
   if (/^[a-d]$/i.test(k) && !e.shiftKey) return String('abcd'.indexOf(k.toLowerCase()) + 1);
   return '';
@@ -5965,6 +5976,7 @@ function openShortcuts() {
     <div class="mt-sm">
       ${row(['1', '2', '3', '4'], 'Pick an answer or grade a card. A to D work too.')}
       ${row(['space'], 'Flip the card, or play and stop the story audio')}
+      ${row(['mic'], 'Talk: say the word out loud, and the card flips when Inky hears it')}
       ${row(['enter'], 'Reveal, submit, confirm or continue')}
       ${row(['Shift', 'enter'], 'New line while typing a sentence')}
       ${row(['esc'], 'Leave the lesson or close a window')}
@@ -5984,6 +5996,176 @@ onAction({
   },
   'kbd-help': () => openShortcuts()
 });
+
+/* =====================================================================
+   39. V2.3 — DAILY REMINDERS
+   Push notifications that arrive even when InkLit is closed. This device saves a push
+   token under users/{uid}/devices; an hourly job on GitHub checks your streak and due
+   words and sends a nudge at the time you pick, plus a 9 PM last call if your streak
+   is at risk. The same idea Duolingo uses, run from your own GitHub.
+   ===================================================================== */
+const VAPID_KEY = 'PASTE_INKLIT_WEB_PUSH_KEY'; // inklit-4b02e: Project settings → Cloud Messaging → Web Push certificates → Key pair
+const REMINDER_HOURS = [7, 8, 12, 15, 16, 17, 18, 19, 20, 21];
+const RM = { status: 'checking', busy: false };
+if (!Number.isInteger(prefs.reminderHour)) prefs.reminderHour = 19;
+
+const hourLabel = h => new Date(2000, 0, 1, h).toLocaleTimeString('en-US', { hour: 'numeric' });
+const RM_TEXT = {
+  checking: 'Checking this browser…',
+  unsupported: "This browser can't get push notifications. On iPhone, add InkLit to your Home Screen first.",
+  'needs-key': 'Add the Web Push key (VAPID_KEY) in index.html to turn this on.',
+  'signed-out': 'Sign in with Google first, so reminders can reach you on this device.',
+  blocked: 'Notifications are blocked for InkLit. Allow them in your browser or phone settings.',
+  off: 'Get a nudge to read and review your words, even when InkLit is closed.',
+  on: "On. You'll get a nudge if you haven't read by this time, plus a 9 PM last call if your streak is at risk."
+};
+
+async function messagingApi() {
+  if (!(await loadFirebase())) throw new Error('Cloud sync is unavailable');
+  const [{ getApp }, M] = await Promise.all([import(`${FB_SDK}firebase-app.js`), import(`${FB_SDK}firebase-messaging.js`)]);
+  return { M, app: getApp() };
+}
+
+async function reminderSupport() {
+  if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+  try { const { M } = await messagingApi(); return await M.isSupported(); } catch { return false; }
+}
+
+async function refreshReminderStatus() {
+  const supported = await reminderSupport();
+  if (!supported) RM.status = 'unsupported';
+  else if (VAPID_KEY.startsWith('PASTE')) RM.status = 'needs-key';
+  else if (!S.uid) RM.status = 'signed-out';
+  else if (Notification.permission === 'denied') RM.status = 'blocked';
+  else RM.status = prefs.reminders && Notification.permission === 'granted' ? 'on' : 'off';
+  paintReminders();
+}
+
+function remindersBlockHTML() {
+  const on = RM.status === 'on';
+  const canToggle = ['on', 'off'].includes(RM.status);
+  return `<div class="set-block" id="rmBlock">
+    <div class="set-title"><span>${icon('bell')} Daily reminders</span><span class="tag ${on ? 'green' : ''}">${on ? 'On' : 'Off'}</span></div>
+    <p class="small muted mt-sm">${esc(RM_TEXT[RM.status] || '')}</p>
+    <div class="key-row${canToggle ? '' : ' hidden'}">
+      <select class="field" data-change="rm-hour" aria-label="Reminder time" style="font-family:inherit;font-size:15px">${REMINDER_HOURS.map(h =>
+        `<option value="${h}"${h === prefs.reminderHour ? ' selected' : ''}>${hourLabel(h)}</option>`).join('')}</select>
+      <button type="button" class="btn ${on ? 'btn-ghost' : 'btn-primary'}" data-act="rm-toggle"${RM.busy ? ' disabled' : ''}>${on ? 'Turn off' : `${icon('bell')} Turn on`}</button>
+    </div>
+    ${RM.status === 'signed-out' && !UI.cloudFailed ? `<button type="button" class="btn btn-primary btn-sm mt-sm" data-act="sign-in">${icon('cloud')} Sign in</button>` : ''}
+  </div>`;
+}
+function paintReminders() {
+  const block = $('#rmBlock');
+  if (block) block.outerHTML = remindersBlockHTML();
+}
+
+async function deviceIdFor(token) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return 'd' + [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 30);
+}
+
+async function saveReminderDevice() {
+  const { M, app } = await messagingApi();
+  await navigator.serviceWorker.register('sw.js');
+  const reg = await Promise.race([
+    navigator.serviceWorker.ready,
+    sleep(10000).then(() => { throw new Error('The service worker did not start'); })
+  ]);
+  const token = await M.getToken(M.getMessaging(app), { vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+  if (!token) throw new Error('No push token');
+  const id = await deviceIdFor(token);
+  const old = prefs.pushDeviceId;
+  await FB.F.setDoc(cloudRef(['devices', id]), {
+    token, enabled: true, hour: prefs.reminderHour,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    platform: navigator.userAgent.slice(0, 120), updatedAt: Date.now()
+  }, { merge: true });
+  if (old && old !== id) FB.F.deleteDoc(cloudRef(['devices', old])).catch(() => {});
+  prefs.pushDeviceId = id;
+  savePrefs();
+}
+
+async function enableReminders() {
+  if (RM.busy) return;
+  if (!cloudOn()) {
+    toast('Sign in first so reminders can reach this device.', { ic: 'cloud', action: UI.cloudFailed ? null : { label: 'Sign in', onClick: () => signIn() } });
+    return;
+  }
+  const perm = await askNotifyPermission(); // asked first, while the tap still counts
+  if (perm !== 'granted') {
+    RM.status = perm === 'denied' ? 'blocked' : perm === 'unsupported' ? 'unsupported' : 'off';
+    paintReminders();
+    return;
+  }
+  RM.busy = true;
+  paintReminders();
+  try {
+    await saveReminderDevice();
+    prefs.reminders = true;
+    prefs.notify = true;
+    savePrefs();
+    RM.status = 'on';
+    toast(`Reminders are on. If you haven't read by ${hourLabel(prefs.reminderHour)}, Inky will nudge you.`, { type: 'success', ic: 'bell' });
+  } catch (e) {
+    console.warn('[InkLit] reminders', e);
+    RM.status = 'off';
+    toast(e?.code === 'permission-denied'
+      ? "Couldn't save this device. Publish the updated Firestore rules."
+      : `Couldn't turn on reminders: ${e?.message || 'unknown error'}`, { type: 'error', ic: 'bell', ms: 7000 });
+  } finally {
+    RM.busy = false;
+    paintReminders();
+  }
+}
+
+async function disableReminders() {
+  if (RM.busy) return;
+  RM.busy = true;
+  paintReminders();
+  try {
+    if (prefs.pushDeviceId && cloudOn()) await FB.F.deleteDoc(cloudRef(['devices', prefs.pushDeviceId]));
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && await reg.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe();
+    prefs.reminders = false;
+    prefs.pushDeviceId = '';
+    savePrefs();
+    RM.status = 'off';
+    toast('Reminders are off on this device.', { ic: 'bell' });
+  } catch (e) {
+    console.warn('[InkLit] reminders off', e);
+    toast("Couldn't turn reminders off. Please try again.", { type: 'error' });
+  } finally {
+    RM.busy = false;
+    paintReminders();
+  }
+}
+
+onAction({ 'rm-toggle': () => (RM.status === 'on' ? disableReminders() : enableReminders()) });
+onChange({
+  'rm-hour': el => {
+    prefs.reminderHour = clamp(parseInt(el.value, 10) || 19, 0, 23);
+    savePrefs();
+    if (prefs.reminders && prefs.pushDeviceId && cloudOn()) {
+      cloudWrite(['devices', prefs.pushDeviceId], { hour: prefs.reminderHour, updatedAt: Date.now() });
+    }
+    toast(`Reminder time set to ${hourLabel(prefs.reminderHour)}.`, { type: 'success', ic: 'clock' });
+  }
+});
+
+// Check the status whenever Settings opens
+new MutationObserver(() => { if ($('#rmBlock')) refreshReminderStatus(); }).observe(sheetRoot, { childList: true });
+
+// Push tokens can change, and so can your time zone: refresh this device's entry once per visit
+let rmRefreshed = false, rmTries = 0;
+const rmRefreshTimer = setInterval(() => {
+  if (rmRefreshed || rmTries >= 3) { clearInterval(rmRefreshTimer); return; }
+  if (!prefs.reminders || !cloudOn() || !('Notification' in window) || Notification.permission !== 'granted' || VAPID_KEY.startsWith('PASTE')) return;
+  rmRefreshed = true;
+  rmTries++;
+  saveReminderDevice().catch(e => { rmRefreshed = false; console.info('[InkLit] reminder refresh', e); });
+}, 5000);
 
 /* =====================================================================
    31. BOOT
