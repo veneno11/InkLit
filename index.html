@@ -5185,7 +5185,7 @@ function postToSW(msg) {
 const timerAlertsAllowed = () => prefs.notify && 'Notification' in window && Notification.permission === 'granted';
 
 function syncTimerNote() {
-  if (document.hidden && timer.running && timerAlertsAllowed()) {
+  if (document.hidden && timer.running && timerAlertsAllowed() && !window.inkLiveTimerOn) {
     const book = S.books[timer.bookId];
     const base = timer.startedAt - timer.accMs; // start time as if there had been no pauses
     postToSW({
@@ -6166,6 +6166,133 @@ const rmRefreshTimer = setInterval(() => {
   rmTries++;
   saveReminderDevice().catch(e => { rmRefreshed = false; console.info('[InkLit] reminder refresh', e); });
 }, 5000);
+
+/* =====================================================================
+   40. V2.3 — LIVE LOCK-SCREEN TIMER
+   A web notification can't tick by itself, and the service worker only wakes up every
+   so often, so the old timer notification lags. This shows the running timer as a
+   "now playing" media player instead (a silent audio track + Media Session). Android draws
+   its progress bar and elapsed time live, and its play/pause buttons control the timer.
+   The track also keeps countdowns finishing on time in the background.
+   If it can't start, or something else starts playing, the old notification takes over.
+   ===================================================================== */
+if (prefs.liveTimer === undefined) prefs.liveTimer = true;
+
+// 10 seconds of silence as a tiny WAV file, looped while the timer runs
+function silentWavUrl(seconds = 10, rate = 8000) {
+  const n = seconds * rate;
+  const buf = new ArrayBuffer(44 + n);
+  const v = new DataView(buf);
+  const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  str(36, 'data'); v.setUint32(40, n, true);
+  new Uint8Array(buf, 44).fill(128); // 8-bit silence is the midpoint value
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+const LiveTimer = {
+  supported: 'mediaSession' in navigator && typeof window.MediaMetadata === 'function'
+    && typeof navigator.mediaSession.setPositionState === 'function',
+  audio: null, src: '', on: false, starting: false, handedOff: false, dur: 0,
+
+  sync() {
+    if (!this.supported) return;
+    if (prefs.liveTimer === false || !tActive()) { this.handedOff = false; this.stop(); return; }
+    if (!timer.running) this.handedOff = false; // resuming later may take over the audio again
+    if (this.on) this.update();
+    else if (timer.running && !this.handedOff) this.start();
+  },
+
+  async start() {
+    if (this.on || this.starting) return;
+    this.starting = true;
+    try {
+      if (!this.audio) {
+        this.audio = new Audio();
+        this.audio.loop = true;
+        this.audio.preload = 'auto';
+        this.audio.addEventListener('timeupdate', () => this.heartbeat());
+        this.audio.addEventListener('pause', () => {
+          // Paused by something else (like a music app), not by us: hand back to the old notification
+          if (this.on && timer.running) { this.handedOff = true; this.stop(); syncOldNote(); }
+        });
+      }
+      if (!this.src) this.src = silentWavUrl();
+      if (this.audio.src !== this.src) this.audio.src = this.src;
+      await this.audio.play(); // needs the tap that started the timer
+      this.on = true;
+      window.inkLiveTimerOn = true;
+      this.bindActions();
+      this.update();
+      syncOldNote(); // hides the old notification if it was showing
+    } catch (e) {
+      console.info('[InkLit] live timer unavailable, using the regular notification', e?.name || e);
+    } finally {
+      this.starting = false;
+    }
+  },
+
+  update() {
+    if (!this.on) return;
+    const ms = tElapsed(), target = tTarget(), cd = timer.mode === 'countdown';
+    // Stopwatch: the bar fills at your goal, then grows by another goal's length
+    this.dur = cd ? target : Math.max(target, Math.ceil((ms + 1000) / target) * target);
+    const book = S.books[timer.bookId];
+    const clock = t => new Date(t).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const line = cd
+      ? (timer.running ? `Countdown · ends ${clock(timer.startedAt - timer.accMs + target)}` : 'Countdown · paused')
+      : `Stopwatch · ${ms >= target ? `past your ${timer.minutes} min goal` : `${timer.minutes} min goal`}${timer.running ? '' : ' · paused'}`;
+    const session = navigator.mediaSession;
+    try {
+      session.metadata = new MediaMetadata({
+        title: book ? book.title : 'Reading session',
+        artist: line,
+        album: 'InkLit',
+        artwork: [{ src: 'icon-192.png', sizes: '192x192', type: 'image/png' }]
+      });
+      session.playbackState = timer.running ? 'playing' : 'paused';
+      session.setPositionState({ duration: this.dur / 1000, playbackRate: 1, position: Math.min(ms, this.dur) / 1000 });
+    } catch (e) { console.info('[InkLit] media session', e); }
+    if (timer.running) { if (this.audio.paused) this.audio.play().catch(() => {}); }
+    else if (!this.audio.paused) this.audio.pause();
+  },
+
+  // Media events keep firing in the background, unlike timers, so countdowns end on time
+  heartbeat() {
+    if (!this.on || !timer.running) return;
+    const ms = tElapsed();
+    if (timer.mode === 'countdown' && ms >= tTarget()) countdownDone();
+    else if (timer.mode === 'stopwatch' && ms >= this.dur) this.update();
+  },
+
+  bindActions() {
+    const set = (action, fn) => { try { navigator.mediaSession.setActionHandler(action, fn); } catch {} };
+    set('play', () => timerStart());
+    set('pause', () => timerPause());
+    set('stop', () => timerPause());
+    ['seekto', 'seekbackward', 'seekforward', 'previoustrack', 'nexttrack'].forEach(a => set(a, null));
+  },
+
+  stop() {
+    if (!this.on) return;
+    this.on = false;
+    window.inkLiveTimerOn = false;
+    if (this.audio && !this.audio.paused) this.audio.pause();
+    const session = navigator.mediaSession;
+    try { session.metadata = null; session.playbackState = 'none'; session.setPositionState(); } catch {}
+    ['play', 'pause', 'stop', 'seekto', 'seekbackward', 'seekforward', 'previoustrack', 'nexttrack']
+      .forEach(a => { try { session.setActionHandler(a, null); } catch {} });
+  }
+};
+
+// Every timer change already calls syncTimerNote(), so the live player rides along with it
+const syncOldNote = syncTimerNote;
+syncTimerNote = function () { LiveTimer.sync(); syncOldNote(); };
+
+// Flipping the Settings switch mid-session takes effect right away
+document.addEventListener('change', e => { if (e.target?.dataset?.pref === 'liveTimer') syncTimerNote(); });
 
 /* =====================================================================
    31. BOOT
