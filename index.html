@@ -6107,7 +6107,7 @@ async function enableReminders() {
     prefs.notify = true;
     savePrefs();
     RM.status = 'on';
-    toast(`Reminders are on. If you haven't read by ${hourLabel(prefs.reminderHour)}, Inky will nudge you.`, { type: 'success', ic: 'bell' });
+    toast(`Reminders are on. If you haven't read or done your lesson by ${hourLabel(prefs.reminderHour)}, Inky will nudge you.`, { type: 'success', ic: 'bell' });
   } catch (e) {
     console.warn('[InkLit] reminders', e);
     RM.status = 'off';
